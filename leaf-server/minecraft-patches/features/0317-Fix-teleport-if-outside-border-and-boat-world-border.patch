@@ -1,0 +1,184 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Alex <42610166+renwixx@users.noreply.github.com>
+Date: Fri, 16 Oct 2026 19:10:12 +0200
+Subject: [PATCH] Fix teleport if outside border and boat world border bypass
+
+
+diff --git a/net/minecraft/core/dispenser/BoatDispenseItemBehavior.java b/net/minecraft/core/dispenser/BoatDispenseItemBehavior.java
+index 0d1b0898f33ad4ad4dd58bb1a2cb3d0a685542d2..3af9f732404592edb2dec9e311d9af8c3fceca5e 100644
+--- a/net/minecraft/core/dispenser/BoatDispenseItemBehavior.java
++++ b/net/minecraft/core/dispenser/BoatDispenseItemBehavior.java
+@@ -70,6 +70,9 @@ public class BoatDispenseItemBehavior extends DefaultDispenseItemBehavior {
+             boat.setInitialPos(event.getVelocity().getX(), event.getVelocity().getY(), event.getVelocity().getZ()); // CraftBukkit
+             EntityType.<AbstractBoat>createDefaultStackConfig(level, dispensed, null).apply(boat);
+             boat.setYRot(direction.toYRot());
++            if (!level.getWorldBorder().isWithinBounds(boat.getBoundingBox())) {
++                return this.defaultDispenseItemBehavior.dispense(source, dispensed);
++            }
+             if (level.addFreshEntity(boat) && shrink) dispensed.shrink(1); // Paper - if entity add was successful and supposed to shrink
+         }
+ 
+diff --git a/net/minecraft/server/level/ServerPlayer.java b/net/minecraft/server/level/ServerPlayer.java
+index a9e39e90216a057fc2ea3f2650bb78f81f790a80..f2638c0608f851e2d7d37f62c8b4d7a769324d72 100644
+--- a/net/minecraft/server/level/ServerPlayer.java
++++ b/net/minecraft/server/level/ServerPlayer.java
+@@ -2412,7 +2412,8 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+     // Paper start - use dismount cause
+     @Override
+     public void dismountTo(double x, double y, double z) {
+-        this.teleportTo(x, y, z, org.bukkit.event.player.PlayerTeleportEvent.TeleportCause.DISMOUNT);
++        Vec3 clamped = clampToWorldBorder(this, x, y, z);
++        this.teleportTo(clamped.x, clamped.y, clamped.z, org.bukkit.event.player.PlayerTeleportEvent.TeleportCause.DISMOUNT);
+     }
+     // Paper end - use dismount cause
+ 
+@@ -3421,20 +3422,22 @@ public class ServerPlayer extends Player implements ca.spottedleaf.moonrise.patc
+             this.closeContainer(org.bukkit.event.inventory.InventoryCloseEvent.Reason.TELEPORT);
+         }
+ 
+-        ServerLevel toLevel = ((org.bukkit.craftbukkit.CraftWorld) to.getWorld()).getHandle();
+-        if (this.level() == toLevel) {
+-            this.connection.internalTeleport(to);
+-        } else {
+-            this.teleport(new TeleportTransition(
+-                toLevel,
+-                org.bukkit.craftbukkit.util.CraftLocation.toVec3(to),
+-                Vec3.ZERO,
+-                to.getYaw(),
+-                to.getPitch(),
+-                net.minecraft.world.entity.Relative.ALL,
+-                TeleportTransition.DO_NOTHING
+-            ).withCause(org.bukkit.event.player.PlayerTeleportEvent.TeleportCause.UNKNOWN));
+-        }
++        ServerLevel toLevel = to.getWorld() != null ? ((org.bukkit.craftbukkit.CraftWorld) to.getWorld()).getHandle() : (ServerLevel) this.level();
++        toLevel.getChunkSource().addTicketWithRadius(
++            net.minecraft.server.level.TicketType.POST_TELEPORT,
++            new net.minecraft.world.level.ChunkPos(net.minecraft.util.Mth.floor(to.getX()) >> 4, net.minecraft.util.Mth.floor(to.getZ()) >> 4),
++            1
++        );
++
++        this.teleport(new TeleportTransition(
++            toLevel,
++            org.bukkit.craftbukkit.util.CraftLocation.toVec3(to),
++            Vec3.ZERO,
++            to.getYaw(),
++            to.getPitch(),
++            java.util.Collections.emptySet(),
++            TeleportTransition.DO_NOTHING
++        ).withCause(org.bukkit.event.player.PlayerTeleportEvent.TeleportCause.PLUGIN));
+     }
+     // Purpur end - Add option to teleport to spawn if outside world border
+ 
+diff --git a/net/minecraft/server/network/ServerGamePacketListenerImpl.java b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
+index 195eaf30cff3aee73e2c1038b7382f5b65e3d2c3..4e1ae1c106982b6749858e3d4515c716aa2a2fa1 100644
+--- a/net/minecraft/server/network/ServerGamePacketListenerImpl.java
++++ b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
+@@ -683,7 +683,9 @@ public class ServerGamePacketListenerImpl
+                 if (!teleportBack) {
+                     // note: only call after setLocation, or else getBoundingBox is wrong
+                     final AABB newBox = vehicle.getBoundingBox();
+-                    if (didCollide || !oldAABB.equals(newBox)) {
++                    if (!level.getWorldBorder().isWithinBounds(newBox)) {
++                        teleportBack = true;
++                    } else if (didCollide || !oldAABB.equals(newBox)) {
+                         teleportBack = this.hasNewCollision(level, vehicle, oldAABB, newBox);
+                     } // else: no collision at all detected, why do we care?
+                 }
+diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
+index 7ed71db5167c0bbd007d6cea36bd5beddede0544..483b5d9ef1221b47532e152ac3d9b6de532e93b8 100644
+--- a/net/minecraft/world/entity/Entity.java
++++ b/net/minecraft/world/entity/Entity.java
+@@ -1093,7 +1093,12 @@ public abstract class Entity
+             && this.level.paperConfig().environment.netherCeilingVoidDamageHeight.test(v -> this.getY() >= v)
+             && (!(this instanceof Player player) || !player.getAbilities().invulnerable))) {
+             // Paper end - Configurable nether ceiling damage
+-            if (this.level.purpurConfig.teleportOnNetherCeilingDamage && this.level.getWorld().getEnvironment() == org.bukkit.World.Environment.NETHER && this instanceof ServerPlayer player) player.teleport(org.bukkit.craftbukkit.util.CraftLocation.toBukkit(this.level.getLevelData().getRespawnData().pos(), this.level)); else // Purpur - Add option to teleport to spawn on nether ceiling damage
++            if (this.level.purpurConfig.teleportOnNetherCeilingDamage && this.level.getWorld().getEnvironment() == org.bukkit.World.Environment.NETHER && this instanceof ServerPlayer player) {
++                ServerLevel respawnLevel = player.level().getServer().findRespawnDimension();
++                net.minecraft.world.level.storage.LevelData.RespawnData respawnData = respawnLevel.getRespawnData();
++                Vec3 spawnPos = Vec3.atBottomCenterOf(player.adjustSpawnLocation(respawnLevel, respawnData.pos()));
++                player.teleport(new org.bukkit.Location(respawnLevel.getWorld(), spawnPos.x, spawnPos.y, spawnPos.z, respawnData.yaw(), respawnData.pitch()));
++            } else // Purpur - Add option to teleport to spawn on nether ceiling damage
+             this.onBelowWorld();
+         }
+     }
+@@ -3590,6 +3595,10 @@ public abstract class Entity
+             return false;
+         }
+ 
++        if (this instanceof Player && !this.level().getWorldBorder().isWithinBounds(entityToRide.getBoundingBox())) {
++            return false;
++        }
++
+         if (!force && !this.level().isClientSide() && !entityToRide.type.canSerialize()) { // SPIGOT-7947: Allow force riding all entities
+             return false;
+         }
+@@ -4847,7 +4856,25 @@ public abstract class Entity
+     }
+ 
+     public void dismountTo(final double x, final double y, final double z) {
+-        this.teleportTo(x, y, z); // Paper - diff on change for override
++        Vec3 clamped = clampToWorldBorder(this, x, y, z);
++        this.teleportTo(clamped.x, clamped.y, clamped.z); // Paper - diff on change for override
++    }
++
++    public static Vec3 clampToWorldBorder(final Entity entity, final double x, final double y, final double z) {
++        Level level = entity.level();
++        if (level == null) {
++            return new Vec3(x, y, z);
++        }
++        WorldBorder border = level.getWorldBorder();
++        double halfWidth = entity.getBbWidth() / 2.0;
++        double minAllowedX = border.getMinX() + halfWidth + 1.0E-5;
++        double maxAllowedX = border.getMaxX() - halfWidth - 1.0E-5;
++        double minAllowedZ = border.getMinZ() + halfWidth + 1.0E-5;
++        double maxAllowedZ = border.getMaxZ() - halfWidth - 1.0E-5;
++
++        double clampedX = minAllowedX <= maxAllowedX ? Mth.clamp(x, minAllowedX, maxAllowedX) : border.getCenterX();
++        double clampedZ = minAllowedZ <= maxAllowedZ ? Mth.clamp(z, minAllowedZ, maxAllowedZ) : border.getCenterZ();
++        return new Vec3(clampedX, y, clampedZ);
+     }
+ 
+     public void teleportTo(final double x, final double y, final double z) {
+diff --git a/net/minecraft/world/entity/LivingEntity.java b/net/minecraft/world/entity/LivingEntity.java
+index 1fb657e90e7b27d0eb66f369f1711a298489fb1e..6f2074f57439dbd73fbb0cd80b481b3b4199c747 100644
+--- a/net/minecraft/world/entity/LivingEntity.java
++++ b/net/minecraft/world/entity/LivingEntity.java
+@@ -477,7 +477,10 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+                     if (damagePerBlock > 0.0) {
+                         // Purpur start - Add option to teleport to spawn if outside world border
+                         if (this.level().purpurConfig.teleportIfOutsideBorder && this instanceof ServerPlayer serverPlayer) {
+-                            serverPlayer.teleport(org.bukkit.craftbukkit.util.CraftLocation.toBukkit(this.level().getLevelData().getRespawnData().pos(), this.level()));
++                            ServerLevel respawnLevel = serverPlayer.level().getServer().findRespawnDimension();
++                            net.minecraft.world.level.storage.LevelData.RespawnData respawnData = respawnLevel.getRespawnData();
++                            Vec3 spawnPos = Vec3.atBottomCenterOf(serverPlayer.adjustSpawnLocation(respawnLevel, respawnData.pos()));
++                            serverPlayer.teleport(new org.bukkit.Location(respawnLevel.getWorld(), spawnPos.x, spawnPos.y, spawnPos.z, respawnData.yaw(), respawnData.pitch()));
+                             return;
+                         }
+                         // Purpur end - Add option to teleport to spawn if outside world border
+diff --git a/net/minecraft/world/entity/projectile/throwableitemprojectile/ThrownEnderpearl.java b/net/minecraft/world/entity/projectile/throwableitemprojectile/ThrownEnderpearl.java
+index df1f4771eaea6e0e41d585e5c35d555b00ae0c4a..10aba0f521994a0f9c37c38a5608bff10589f22b 100644
+--- a/net/minecraft/world/entity/projectile/throwableitemprojectile/ThrownEnderpearl.java
++++ b/net/minecraft/world/entity/projectile/throwableitemprojectile/ThrownEnderpearl.java
+@@ -103,7 +103,7 @@ public class ThrownEnderpearl extends ThrowableItemProjectile {
+         if (this.level() instanceof ServerLevel level && !this.isRemoved()) {
+             Entity owner = this.getOwner();
+             if (owner != null && isAllowedToTeleportOwner(owner, level)) {
+-                Vec3 teleportPos = this.oldPosition();
++                Vec3 teleportPos = Entity.clampToWorldBorder(owner, this.oldPosition().x, this.oldPosition().y, this.oldPosition().z);
+                 if (owner instanceof ServerPlayer player) {
+                     if (player.connection.isAcceptingMessages()) {
+                         // Leaf start - SparklyPaper - parallel world ticking - handling for pearl teleportation cross-dimension
+diff --git a/net/minecraft/world/item/BoatItem.java b/net/minecraft/world/item/BoatItem.java
+index 597f14af31e1a1253e5d412af390e200632ba279..66477f188dc98865750ba85ff41bbf0efdc0634d 100644
+--- a/net/minecraft/world/item/BoatItem.java
++++ b/net/minecraft/world/item/BoatItem.java
+@@ -66,7 +66,7 @@ public class BoatItem extends Item {
+ 
+             boat.setYRot(player.getYRot());
+             if (!level.purpurConfig.persistentDroppableEntityDisplayNames) boat.setCustomName(null); // Purpur - Apply display names from item forms of entities to entities and vice versa
+-            if (!level.noCollision(boat, boat.getBoundingBox())) {
++            if (!level.getWorldBorder().isWithinBounds(boat.getBoundingBox()) || !level.noCollision(boat, boat.getBoundingBox())) {
+                 return InteractionResult.FAIL;
+             }
+ 
