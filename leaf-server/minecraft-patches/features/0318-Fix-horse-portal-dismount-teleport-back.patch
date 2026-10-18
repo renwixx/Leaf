@@ -1,0 +1,126 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Alex <42610166+renwixx@users.noreply.github.com>
+Date: Sun, 18 Oct 2026 22:24:21 +0200
+Subject: [PATCH] Fix horse portal dismount teleport back
+
+
+diff --git a/net/minecraft/server/network/ServerGamePacketListenerImpl.java b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
+index 4e1ae1c106982b6749858e3d4515c716aa2a2fa1..d3408750042b07aeba8f55d8ab73f82dfcd667a0 100644
+--- a/net/minecraft/server/network/ServerGamePacketListenerImpl.java
++++ b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
+@@ -478,7 +478,27 @@ public class ServerGamePacketListenerImpl
+         this.lastGoodX = this.player.getX();
+         this.lastGoodY = this.player.getY();
+         this.lastGoodZ = this.player.getZ();
++        // Leaf start - Fix horse/vehicle portal collision and dismount teleport back
++        this.resetVehiclePosition();
++        // Leaf end - Fix horse/vehicle portal collision and dismount teleport back
++    }
++
++    // Leaf start - Fix horse/vehicle portal collision and dismount teleport back
++    public void resetVehiclePosition() {
++        Entity vehicle = this.player.getRootVehicle();
++        if (vehicle != this.player && vehicle.getControllingPassenger() == this.player) {
++            this.lastVehicle = vehicle;
++            this.vehicleFirstGoodX = vehicle.getX();
++            this.vehicleFirstGoodY = vehicle.getY();
++            this.vehicleFirstGoodZ = vehicle.getZ();
++            this.vehicleLastGoodX = vehicle.getX();
++            this.vehicleLastGoodY = vehicle.getY();
++            this.vehicleLastGoodZ = vehicle.getZ();
++        } else {
++            this.lastVehicle = null;
++        }
+     }
++    // Leaf end - Fix horse/vehicle portal collision and dismount teleport back
+ 
+     @Override
+     public boolean isAcceptingMessages() {
+@@ -576,8 +596,18 @@ public class ServerGamePacketListenerImpl
+             if (this.awaitingPositionFromClient != null || this.player.isImmobile() || vehicle.isRemoved()) {
+                 return;
+             }
+-            // Paper end - Don't allow vehicle movement from players while teleporting
+-            if (vehicle != this.player && vehicle.getControllingPassenger() == this.player && vehicle == this.lastVehicle) {
++            if (vehicle != this.player && vehicle.getControllingPassenger() == this.player) {
++                // Leaf start - Fix horse/vehicle portal collision and dismount teleport back
++                if (vehicle != this.lastVehicle) {
++                    this.lastVehicle = vehicle;
++                    this.vehicleFirstGoodX = vehicle.getX();
++                    this.vehicleFirstGoodY = vehicle.getY();
++                    this.vehicleFirstGoodZ = vehicle.getZ();
++                    this.vehicleLastGoodX = vehicle.getX();
++                    this.vehicleLastGoodY = vehicle.getY();
++                    this.vehicleLastGoodZ = vehicle.getZ();
++                }
++                // Leaf end - Fix horse/vehicle portal collision and dismount teleport back
+                 ServerLevel level = this.player.level();
+                 // CraftBukkit - store current player position
+                 float startYRot = this.player.getYRot();
+@@ -830,6 +860,7 @@ public class ServerGamePacketListenerImpl
+             this.lastGoodZ = this.awaitingPositionFromClient.z;
+             this.player.hasChangedDimension();
+             this.awaitingPositionFromClient = null;
++            this.resetVehiclePosition(); // Leaf - Fix horse/vehicle portal collision and dismount teleport back
+             this.handlePlayerPositionChange(packet.x(), packet.y(), packet.z(), packet.yRot(), packet.xRot(), false, false);
+         }
+     }
+diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
+index 483b5d9ef1221b47532e152ac3d9b6de532e93b8..6a83497dcd4eb08578f7cc06e8afa8cec5c21639 100644
+--- a/net/minecraft/world/entity/Entity.java
++++ b/net/minecraft/world/entity/Entity.java
+@@ -4576,6 +4576,11 @@ public abstract class Entity
+ 
+         for (Entity newPassenger : newPassengers) {
+             newPassenger.startRiding(newEntity, true, false);
++            // Leaf start - Fix horse/vehicle portal collision and dismount teleport back
++            if (newPassenger instanceof ServerPlayer serverPlayer) {
++                serverPlayer.connection.resetVehiclePosition();
++            }
++            // Leaf end - Fix horse/vehicle portal collision and dismount teleport back
+         }
+ 
+         newLevel.resetEmptyTime();
+diff --git a/net/minecraft/world/entity/LivingEntity.java b/net/minecraft/world/entity/LivingEntity.java
+index 6f2074f57439dbd73fbb0cd80b481b3b4199c747..a6f75faa8e55bcb77033d71b9ff14b06af890c6f 100644
+--- a/net/minecraft/world/entity/LivingEntity.java
++++ b/net/minecraft/world/entity/LivingEntity.java
+@@ -3072,11 +3072,14 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+             if (isSmall) {
+                 double halfHeight = this.getBbHeight() / 2.0;
+                 Vec3 center = teleportTarget.add(0.0, halfHeight, 0.0);
+-                VoxelShape allowedCenters = Shapes.create(AABB.ofSize(center, this.getBbWidth(), this.getBbHeight(), this.getBbWidth()));
++                // Leaf start - Fix horse/vehicle portal collision and dismount teleport back
++                double searchRadius = Math.max((double) this.getBbWidth() * 2.0, 2.0);
++                VoxelShape allowedCenters = Shapes.create(AABB.ofSize(center, searchRadius, this.getBbHeight(), searchRadius));
+                 teleportTarget = this.level()
+-                    .findFreePosition(this, allowedCenters, center, this.getBbWidth(), this.getBbHeight(), this.getBbWidth())
++                    .findFreePosition(this, allowedCenters, center, searchRadius, this.getBbHeight(), searchRadius)
+                     .map(pos -> pos.add(0.0, -halfHeight, 0.0))
+                     .orElse(teleportTarget);
++                // Leaf end - Fix horse/vehicle portal collision and dismount teleport back
+             }
+         }
+ 
+diff --git a/net/minecraft/world/level/portal/PortalShape.java b/net/minecraft/world/level/portal/PortalShape.java
+index 5699e75d8cc9a5a2928dbe5f2c74c35bda1d2f64..800f66f67a38f2eecdc7558dd822d7b9cbf448c6 100644
+--- a/net/minecraft/world/level/portal/PortalShape.java
++++ b/net/minecraft/world/level/portal/PortalShape.java
+@@ -251,12 +251,15 @@ public class PortalShape {
+         if (!(dimensions.width() > 4.0F) && !(dimensions.height() > 4.0F)) {
+             double halfHeight = dimensions.height() / 2.0;
+             Vec3 center = bottomCenter.add(0.0, halfHeight, 0.0);
++            // Leaf start - Fix horse/vehicle portal collision and dismount teleport back
++            double searchHorizontal = Math.max((double) dimensions.width() * 2.0, 3.0);
+             VoxelShape allowedCenters = Shapes.create(
+-                AABB.ofSize(center, dimensions.width(), 0.0, dimensions.width()).expandTowards(0.0, 1.0, 0.0).inflate(1.0E-6)
++                AABB.ofSize(center, searchHorizontal, 0.0, searchHorizontal).expandTowards(0.0, 1.0, 0.0).inflate(1.0E-6)
+             );
+             Optional<Vec3> collisionFreePosition = serverLevel.findFreePosition(
+-                entity, allowedCenters, center, dimensions.width(), dimensions.height(), dimensions.width()
++                entity, allowedCenters, center, searchHorizontal, dimensions.height(), searchHorizontal
+             );
++            // Leaf end - Fix horse/vehicle portal collision and dismount teleport back
+             Optional<Vec3> collisionFreeBottomCenter = collisionFreePosition.map(vec -> vec.subtract(0.0, halfHeight, 0.0));
+             return collisionFreeBottomCenter.orElse(bottomCenter);
+         } else {
