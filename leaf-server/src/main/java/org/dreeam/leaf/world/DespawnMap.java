@@ -9,6 +9,7 @@ import net.minecraft.world.entity.boss.enderdragon.EnderDragon;
 import net.minecraft.world.entity.boss.wither.WitherBoss;
 import net.minecraft.world.entity.monster.PatrollingMonster;
 import net.minecraft.world.entity.projectile.ShulkerBullet;
+import net.minecraft.world.entity.vehicle.boat.AbstractBoat;
 import net.minecraft.world.level.entity.EntityTickList;
 import net.minecraft.world.phys.Vec3;
 import org.bukkit.event.entity.EntityRemoveEvent;
@@ -106,6 +107,10 @@ public final class DespawnMap implements Consumer<Entity> {
             // [Mob#checkDespawn()]
             if (difficultyIsPeaceful && !t.isAllowedInPeaceful()) {
                 return true;
+            }
+            if (mob.isPassenger() && (mob.getVehicle() instanceof AbstractBoat || mob.getRootVehicle() instanceof AbstractBoat)) {
+                mob.noActionTime = 0;
+                return false;
             }
             boolean isPersistent = mob.isPersistenceRequired() || mob.requiresCustomPersistence();
 
