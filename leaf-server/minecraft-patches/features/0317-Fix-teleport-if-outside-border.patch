@@ -1,23 +1,9 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Alex <42610166+renwixx@users.noreply.github.com>
 Date: Fri, 16 Oct 2026 19:10:12 +0200
-Subject: [PATCH] Fix teleport if outside border and boat world border bypass
+Subject: [PATCH] Fix teleport if outside border
 
 
-diff --git a/net/minecraft/core/dispenser/BoatDispenseItemBehavior.java b/net/minecraft/core/dispenser/BoatDispenseItemBehavior.java
-index 0d1b0898f33ad4ad4dd58bb1a2cb3d0a685542d2..3af9f732404592edb2dec9e311d9af8c3fceca5e 100644
---- a/net/minecraft/core/dispenser/BoatDispenseItemBehavior.java
-+++ b/net/minecraft/core/dispenser/BoatDispenseItemBehavior.java
-@@ -70,6 +70,9 @@ public class BoatDispenseItemBehavior extends DefaultDispenseItemBehavior {
-             boat.setInitialPos(event.getVelocity().getX(), event.getVelocity().getY(), event.getVelocity().getZ()); // CraftBukkit
-             EntityType.<AbstractBoat>createDefaultStackConfig(level, dispensed, null).apply(boat);
-             boat.setYRot(direction.toYRot());
-+            if (!level.getWorldBorder().isWithinBounds(boat.getBoundingBox())) {
-+                return this.defaultDispenseItemBehavior.dispense(source, dispensed);
-+            }
-             if (level.addFreshEntity(boat) && shrink) dispensed.shrink(1); // Paper - if entity add was successful and supposed to shrink
-         }
- 
 diff --git a/net/minecraft/server/level/ServerPlayer.java b/net/minecraft/server/level/ServerPlayer.java
 index a9e39e90216a057fc2ea3f2650bb78f81f790a80..f2638c0608f851e2d7d37f62c8b4d7a769324d72 100644
 --- a/net/minecraft/server/level/ServerPlayer.java
@@ -169,16 +155,3 @@ index df1f4771eaea6e0e41d585e5c35d555b00ae0c4a..10aba0f521994a0f9c37c38a5608bff1
                  if (owner instanceof ServerPlayer player) {
                      if (player.connection.isAcceptingMessages()) {
                          // Leaf start - SparklyPaper - parallel world ticking - handling for pearl teleportation cross-dimension
-diff --git a/net/minecraft/world/item/BoatItem.java b/net/minecraft/world/item/BoatItem.java
-index 597f14af31e1a1253e5d412af390e200632ba279..66477f188dc98865750ba85ff41bbf0efdc0634d 100644
---- a/net/minecraft/world/item/BoatItem.java
-+++ b/net/minecraft/world/item/BoatItem.java
-@@ -66,7 +66,7 @@ public class BoatItem extends Item {
- 
-             boat.setYRot(player.getYRot());
-             if (!level.purpurConfig.persistentDroppableEntityDisplayNames) boat.setCustomName(null); // Purpur - Apply display names from item forms of entities to entities and vice versa
--            if (!level.noCollision(boat, boat.getBoundingBox())) {
-+            if (!level.getWorldBorder().isWithinBounds(boat.getBoundingBox()) || !level.noCollision(boat, boat.getBoundingBox())) {
-                 return InteractionResult.FAIL;
-             }
- 
