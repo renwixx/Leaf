@@ -4,6 +4,22 @@ Date: Fri, 16 Oct 2026 19:10:12 +0200
 Subject: [PATCH] Fix teleport if outside border
 
 
+diff --git a/net/minecraft/core/dispenser/MinecartDispenseItemBehavior.java b/net/minecraft/core/dispenser/MinecartDispenseItemBehavior.java
+index 138ae5e..c9f91f8 100644
+--- a/net/minecraft/core/dispenser/MinecartDispenseItemBehavior.java
++++ b/net/minecraft/core/dispenser/MinecartDispenseItemBehavior.java
+@@ -87,6 +87,11 @@ public class MinecartDispenseItemBehavior extends DefaultDispenseItemBehavior {
+             level, event.getVelocity().getX(), event.getVelocity().getY(), event.getVelocity().getZ(), this.entityType, EntitySpawnReason.DISPENSER, singleItemStack, null
+         );
+         if (minecart != null) {
++            // Leaf start - Fix minecart world border bypass
++            if (!level.getWorldBorder().isWithinBounds(minecart.getBoundingBox())) {
++                return this.defaultDispenseItemBehavior.dispense(source, dispensed);
++            }
++            // Leaf end - Fix minecart world border bypass
+             if (level.addFreshEntity(minecart) && shrink) dispensed.shrink(1); // Paper - if entity add was successful and supposed to shrink
+             // CraftBukkit end
+         }
 diff --git a/net/minecraft/server/level/ServerPlayer.java b/net/minecraft/server/level/ServerPlayer.java
 index a9e39e90216a057fc2ea3f2650bb78f81f790a80..f2638c0608f851e2d7d37f62c8b4d7a769324d72 100644
 --- a/net/minecraft/server/level/ServerPlayer.java
@@ -64,12 +80,25 @@ index 195eaf30cff3aee73e2c1038b7382f5b65e3d2c3..4e1ae1c106982b6749858e3d4515c716
                      // note: only call after setLocation, or else getBoundingBox is wrong
                      final AABB newBox = vehicle.getBoundingBox();
 -                    if (didCollide || !oldAABB.equals(newBox)) {
-+                    if (!level.getWorldBorder().isWithinBounds(newBox)) {
++                    if (!level.getWorldBorder().isWithinBounds(newBox) || !level.getWorldBorder().isWithinBounds(this.player.getBoundingBox())) {
 +                        teleportBack = true;
 +                    } else if (didCollide || !oldAABB.equals(newBox)) {
                          teleportBack = this.hasNewCollision(level, vehicle, oldAABB, newBox);
                      } // else: no collision at all detected, why do we care?
                  }
+@@ -1742,7 +1746,11 @@ public class ServerGamePacketListenerImpl
+                 this.player.absSnapTo(targetX, targetY, targetZ, targetYRot, targetXRot); // prevent desync by tping to the set position, dropped for unknown reasons by mojang
+                 if (!this.player.noPhysics && !this.player.isSleeping() && allowMovement) {
+                     final AABB newBox = this.player.getBoundingBox();
+-                    if (didCollide || !oldAABB.equals(newBox)) {
++                    // Leaf start - Fix player walking outside world border
++                    if (!this.player.isSpectator() && !level.getWorldBorder().isWithinBounds(newBox)) {
++                        allowMovement = false;
++                    } else if (didCollide || !oldAABB.equals(newBox)) {
++                    // Leaf end - Fix player walking outside world border
+                         // note: only call after setLocation, or else getBoundingBox is wrong
+                         allowMovement = !this.hasNewCollision(level, this.player, oldAABB, newBox);
+                     } // else: no collision at all detected, why do we care?
 diff --git a/net/minecraft/world/entity/Entity.java b/net/minecraft/world/entity/Entity.java
 index 7ed71db5167c0bbd007d6cea36bd5beddede0544..483b5d9ef1221b47532e152ac3d9b6de532e93b8 100644
 --- a/net/minecraft/world/entity/Entity.java
@@ -88,18 +117,37 @@ index 7ed71db5167c0bbd007d6cea36bd5beddede0544..483b5d9ef1221b47532e152ac3d9b6de
              this.onBelowWorld();
          }
      }
-@@ -3590,6 +3595,10 @@ public abstract class Entity
+@@ -3555,7 +3560,17 @@ public abstract class Entity
+     protected void positionRider(final Entity passenger, final Entity.MoveFunction moveFunction) {
+         Vec3 position = this.getPassengerRidingPosition(passenger);
+         Vec3 offset = passenger.getVehicleAttachmentPoint(this);
+-        moveFunction.accept(passenger, position.x - offset.x, position.y - offset.y, position.z - offset.z);
++        // Leaf start - Clamp player riding position to world border
++        double x = position.x - offset.x;
++        double y = position.y - offset.y;
++        double z = position.z - offset.z;
++        if (passenger instanceof Player) {
++            Vec3 clamped = clampToWorldBorder(passenger, x, y, z);
++            x = clamped.x;
++            z = clamped.z;
++        }
++        moveFunction.accept(passenger, x, y, z);
++        // Leaf end - Clamp player riding position to world border
+     }
+ 
+     public void onPassengerTurned(final Entity passenger) {
+@@ -3590,6 +3605,10 @@ public abstract class Entity
              return false;
          }
  
-+        if (this instanceof Player && !this.level().getWorldBorder().isWithinBounds(entityToRide.getBoundingBox())) {
++        if (this instanceof Player && (!this.level().getWorldBorder().isWithinBounds(entityToRide.getBoundingBox()) || !this.level().getWorldBorder().isWithinBounds(this.getBoundingBox()))) {
 +            return false;
 +        }
 +
          if (!force && !this.level().isClientSide() && !entityToRide.type.canSerialize()) { // SPIGOT-7947: Allow force riding all entities
              return false;
          }
-@@ -4847,7 +4856,25 @@ public abstract class Entity
+@@ -4847,7 +4866,25 @@ public abstract class Entity
      }
  
      public void dismountTo(final double x, final double y, final double z) {
@@ -127,23 +175,66 @@ index 7ed71db5167c0bbd007d6cea36bd5beddede0544..483b5d9ef1221b47532e152ac3d9b6de
  
      public void teleportTo(final double x, final double y, final double z) {
 diff --git a/net/minecraft/world/entity/LivingEntity.java b/net/minecraft/world/entity/LivingEntity.java
-index 1fb657e90e7b27d0eb66f369f1711a298489fb1e..6f2074f57439dbd73fbb0cd80b481b3b4199c747 100644
+index d6adac5..7868c04 100644
 --- a/net/minecraft/world/entity/LivingEntity.java
 +++ b/net/minecraft/world/entity/LivingEntity.java
-@@ -477,7 +477,10 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+@@ -471,16 +471,19 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+                 // Gale end - Pufferfish - reduce in wall checks
+                 this.hurtServer(level, this.damageSources().inWall(), 1.0F);
+             } else if (isPlayer && !level.getWorldBorder().isWithinBounds(this.getBoundingBox())) {
++                // Purpur start - Add option to teleport to spawn if outside world border
++                if (this.level().purpurConfig.teleportIfOutsideBorder && this instanceof ServerPlayer serverPlayer) {
++                    ServerLevel respawnLevel = serverPlayer.level().getServer().findRespawnDimension();
++                    net.minecraft.world.level.storage.LevelData.RespawnData respawnData = respawnLevel.getRespawnData();
++                    Vec3 spawnPos = Vec3.atBottomCenterOf(serverPlayer.adjustSpawnLocation(respawnLevel, respawnData.pos()));
++                    serverPlayer.teleport(new org.bukkit.Location(respawnLevel.getWorld(), spawnPos.x, spawnPos.y, spawnPos.z, respawnData.yaw(), respawnData.pitch()));
++                    return;
++                }
++                // Purpur end - Add option to teleport to spawn if outside world border
+                 double dist = level.getWorldBorder().getDistanceToBorder(this) + level.getWorldBorder().getSafeZone();
+                 if (dist < 0.0) {
+                     double damagePerBlock = level.getWorldBorder().getDamagePerBlock();
                      if (damagePerBlock > 0.0) {
-                         // Purpur start - Add option to teleport to spawn if outside world border
-                         if (this.level().purpurConfig.teleportIfOutsideBorder && this instanceof ServerPlayer serverPlayer) {
+-                        // Purpur start - Add option to teleport to spawn if outside world border
+-                        if (this.level().purpurConfig.teleportIfOutsideBorder && this instanceof ServerPlayer serverPlayer) {
 -                            serverPlayer.teleport(org.bukkit.craftbukkit.util.CraftLocation.toBukkit(this.level().getLevelData().getRespawnData().pos(), this.level()));
-+                            ServerLevel respawnLevel = serverPlayer.level().getServer().findRespawnDimension();
-+                            net.minecraft.world.level.storage.LevelData.RespawnData respawnData = respawnLevel.getRespawnData();
-+                            Vec3 spawnPos = Vec3.atBottomCenterOf(serverPlayer.adjustSpawnLocation(respawnLevel, respawnData.pos()));
-+                            serverPlayer.teleport(new org.bukkit.Location(respawnLevel.getWorld(), spawnPos.x, spawnPos.y, spawnPos.z, respawnData.yaw(), respawnData.pitch()));
-                             return;
-                         }
-                         // Purpur end - Add option to teleport to spawn if outside world border
+-                            return;
+-                        }
+-                        // Purpur end - Add option to teleport to spawn if outside world border
+                         this.hurtServer(level, this.damageSources().outOfBorder(), Math.max(1, Mth.floor(-dist * damagePerBlock)));
+                     }
+                 }
+@@ -3068,11 +3071,14 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+             if (isSmall) {
+                 double halfHeight = this.getBbHeight() / 2.0;
+                 Vec3 center = teleportTarget.add(0.0, halfHeight, 0.0);
+-                VoxelShape allowedCenters = Shapes.create(AABB.ofSize(center, this.getBbWidth(), this.getBbHeight(), this.getBbWidth()));
++                // Leaf start - Fix horse/vehicle portal collision and dismount teleport back
++                double searchRadius = Math.max((double) this.getBbWidth() * 2.0, 2.0);
++                VoxelShape allowedCenters = Shapes.create(AABB.ofSize(center, searchRadius, this.getBbHeight(), searchRadius));
+                 teleportTarget = this.level()
+-                    .findFreePosition(this, allowedCenters, center, this.getBbWidth(), this.getBbHeight(), this.getBbWidth())
++                    .findFreePosition(this, allowedCenters, center, searchRadius, this.getBbHeight(), searchRadius)
+                     .map(pos -> pos.add(0.0, -halfHeight, 0.0))
+                     .orElse(teleportTarget);
++                // Leaf end - Fix horse/vehicle portal collision and dismount teleport back
+             }
+         }
+ 
+@@ -4779,6 +4785,11 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+         }
+ 
+         AABB aabb = this.makeBoundingBox(new Vec3(xx, y, zz));
++        // Leaf start - Check world border for random teleports (e.g. chorus fruit)
++        if (!level.getWorldBorder().isWithinBounds(aabb)) {
++            return RandomTeleportResult.FAILURE;
++        }
++        // Leaf end - Check world border for random teleports (e.g. chorus fruit)
+         if (level.noCollision(aabb) && !level.containsAnyLiquid(aabb)) {
+             boolean hasInvalidPosition = level.findBlocksIn(aabb).filterState(isInvalidPosition).anyMatched();
+             if (hasInvalidPosition) {
 diff --git a/net/minecraft/world/entity/projectile/throwableitemprojectile/ThrownEnderpearl.java b/net/minecraft/world/entity/projectile/throwableitemprojectile/ThrownEnderpearl.java
-index df1f4771eaea6e0e41d585e5c35d555b00ae0c4a..10aba0f521994a0f9c37c38a5608bff10589f22b 100644
+index df1f477..10aba0f 100644
 --- a/net/minecraft/world/entity/projectile/throwableitemprojectile/ThrownEnderpearl.java
 +++ b/net/minecraft/world/entity/projectile/throwableitemprojectile/ThrownEnderpearl.java
 @@ -103,7 +103,7 @@ public class ThrownEnderpearl extends ThrowableItemProjectile {
@@ -155,3 +246,57 @@ index df1f4771eaea6e0e41d585e5c35d555b00ae0c4a..10aba0f521994a0f9c37c38a5608bff1
                  if (owner instanceof ServerPlayer player) {
                      if (player.connection.isAcceptingMessages()) {
                          // Leaf start - SparklyPaper - parallel world ticking - handling for pearl teleportation cross-dimension
+diff --git a/net/minecraft/world/entity/vehicle/minecart/OldMinecartBehavior.java b/net/minecraft/world/entity/vehicle/minecart/OldMinecartBehavior.java
+index 615737b..1251eb0 100644
+--- a/net/minecraft/world/entity/vehicle/minecart/OldMinecartBehavior.java
++++ b/net/minecraft/world/entity/vehicle/minecart/OldMinecartBehavior.java
+@@ -201,6 +201,15 @@ public class OldMinecartBehavior extends MinecartBehavior {
+ 
+         x = x0 + xD * progress;
+         z = z0 + zD * progress;
++        // Leaf start - Stop minecart from rolling outside the world border
++        AABB predictedBox = this.minecart.getDimensions(this.minecart.getPose()).makeBoundingBox(x, y, z);
++        if (!this.level().getWorldBorder().isWithinBounds(predictedBox)) {
++            Vec3 clamped = Entity.clampToWorldBorder(this.minecart, x, y, z);
++            x = clamped.x;
++            z = clamped.z;
++            this.setDeltaMovement(Vec3.ZERO);
++        }
++        // Leaf end - Stop minecart from rolling outside the world border
+         this.setPos(x, y, z);
+         double scale = this.minecart.isVehicle() ? 0.75 : 1.0;
+         double maxSpeed = this.minecart.getMaxSpeed(level);
+diff --git a/net/minecraft/world/item/MinecartItem.java b/net/minecraft/world/item/MinecartItem.java
+index a817247..023134a 100644
+--- a/net/minecraft/world/item/MinecartItem.java
++++ b/net/minecraft/world/item/MinecartItem.java
+@@ -51,6 +51,12 @@ public class MinecartItem extends Item {
+             return InteractionResult.FAIL;
+         }
+ 
++        // Leaf start - Fix minecart world border bypass
++        if (!level.getWorldBorder().isWithinBounds(cart.getBoundingBox())) {
++            return InteractionResult.FAIL;
++        }
++        // Leaf end - Fix minecart world border bypass
++
+         if (AbstractMinecart.useExperimentalMovement(level)) {
+             for (Entity entity : level.getEntities(null, cart.getBoundingBox())) {
+                 if (entity instanceof AbstractMinecart) {
+diff --git a/net/minecraft/world/item/SpawnEggItem.java b/net/minecraft/world/item/SpawnEggItem.java
+index 6f3d765..887a4cd 100644
+--- a/net/minecraft/world/item/SpawnEggItem.java
++++ b/net/minecraft/world/item/SpawnEggItem.java
+@@ -99,6 +99,12 @@ public class SpawnEggItem extends Item {
+                     spawnPos = pos.relative(clickedFace);
+                 }
+ 
++                // Leaf start - Check world border on spawn egg use
++                if (!serverLevel.getWorldBorder().isWithinBounds(spawnPos)) {
++                    return InteractionResult.FAIL;
++                }
++                // Leaf end - Check world border on spawn egg use
++
+                 return spawnMob(
+                     type, context.getPlayer(), itemStack, serverLevel, spawnPos, true, !Objects.equals(pos, spawnPos) && clickedFace == Direction.UP
+                 );
